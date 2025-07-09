@@ -1,7 +1,7 @@
 # Makefile for Claude Code Action
 
 # Default values
-ENV ?= monorepo
+ENV ?= develop
 
 # Colors for output
 RED := \033[0;31m
@@ -21,11 +21,13 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(BLUE)%-15s$(NC) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Available environments:"
-	@echo "  - monorepo"
+	@echo "  - develop"
+	@echo "  - staging"
+	@echo "  - production"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make plan ENV=monorepo"
-	@echo "  make apply ENV=monorepo"
+	@echo "  make plan ENV=staging"
+	@echo "  make apply ENV=production"
 
 init: ## Initialize Terragrunt
 	@echo "$(YELLOW)Initializing Terragrunt for $(ENV)...$(NC)"

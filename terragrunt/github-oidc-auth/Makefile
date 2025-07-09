@@ -1,7 +1,7 @@
-# Makefile for Claude Code Action
+# Makefile for GitHub OIDC Auth
 
 # Default values
-ENV ?= monorepo
+ENV ?= develop
 
 # Colors for output
 RED := \033[0;31m
@@ -13,7 +13,7 @@ NC := \033[0m # No Color
 .PHONY: help init plan apply destroy validate fmt check clean
 
 help: ## Show this help message
-	@echo "Claude Code Action - Terragrunt Commands"
+	@echo "GitHub OIDC Auth - Terragrunt Commands"
 	@echo ""
 	@echo "Usage: make <target> [ENV=<repository>]"
 	@echo ""
@@ -21,11 +21,13 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(BLUE)%-15s$(NC) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Available environments:"
-	@echo "  - monorepo"
+	@echo "  - develop"
+	@echo "  - staging"
+	@echo "  - production"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make plan ENV=monorepo"
-	@echo "  make apply ENV=monorepo"
+	@echo "  make plan ENV=staging"
+	@echo "  make apply ENV=production"
 
 init: ## Initialize Terragrunt
 	@echo "$(YELLOW)Initializing Terragrunt for $(ENV)...$(NC)"
