@@ -13,7 +13,7 @@ include "env" {
 
 # Reference to Terraform modules
 terraform {
-  source = "../modules"
+  source = "../../modules"
 }
 
 # Input variables for the module

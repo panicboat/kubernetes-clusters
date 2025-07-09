@@ -13,7 +13,7 @@ include "env" {
 
 # Terraform module source
 terraform {
-  source = "../modules"
+  source = "../../modules"
 }
 
 # Repository-specific inputs
