@@ -1,0 +1,146 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus-operator-crds
+  namespace: flux-system
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: prometheus-operator-crds
+      version: "14.0.0"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  targetNamespace: prometheus-operator-system
+  install:
+    createNamespace: true
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: flux-system
+spec:
+  interval: 30m
+  dependsOn:
+    - name: prometheus-operator-crds
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: "65.1.1"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  targetNamespace: prometheus-operator-system
+  install:
+    createNamespace: true
+  values:
+    crds:
+      enabled: false
+    
+    prometheus:
+      prometheusSpec:
+        serviceMonitorSelectorNilUsesHelmValues: false
+        serviceMonitorSelector: {}
+        serviceMonitorNamespaceSelector: {}
+        podMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelector: {}
+        podMonitorNamespaceSelector: {}
+        retention: 7d
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: standard
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 2Gi
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      service:
+        type: ClusterIP
+        port: 9090
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        hosts:
+          - prometheus.local
+    
+    alertmanager:
+      alertmanagerSpec:
+        storage:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: standard
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 1Gi
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+      service:
+        type: ClusterIP
+        port: 9093
+    
+    grafana:
+      enabled: true
+      adminPassword: admin
+      service:
+        type: ClusterIP
+        port: 80
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        hosts:
+          - grafana.local
+      persistence:
+        enabled: true
+        storageClassName: standard
+        size: 1Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+      sidecar:
+        datasources:
+          enabled: true
+          defaultDatasourceEnabled: true
+    
+    kubeStateMetrics:
+      enabled: true
+    
+    nodeExporter:
+      enabled: true
+    
+    prometheusOperator:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      admissionWebhooks:
+        enabled: true
+        patch:
+          enabled: true
+    

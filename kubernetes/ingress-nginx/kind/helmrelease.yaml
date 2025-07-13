@@ -45,9 +45,11 @@ spec:
       config:
         log-level: "2"
 
-      # Disable metrics collection for local environment
+      # Enable metrics collection for prometheus
       metrics:
-        enabled: false
+        enabled: true
+        serviceMonitor:
+          enabled: true
 
       # Disable admission webhooks to simplify local setup
       admissionWebhooks:
