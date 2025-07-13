@@ -1,0 +1,69 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: grafana
+  namespace: flux-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: grafana
+      version: "8.5.2"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+  install:
+    createNamespace: true
+  targetNamespace: monitoring
+  values:
+    # Admin user configuration
+    adminUser: admin
+    adminPassword: admin123
+    
+    # Service configuration
+    service:
+      type: ClusterIP
+      port: 80
+    
+    # Ingress configuration for accessing Grafana
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      hosts:
+        - grafana.local
+      paths:
+        - path: /
+          pathType: Prefix
+    
+    # Resource limits optimized for local development
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    
+    # Persistence for dashboards and data
+    persistence:
+      enabled: true
+      storageClassName: standard
+      size: 1Gi
+    
+    # Default data sources
+    datasources:
+      datasources.yaml:
+        apiVersion: 1
+        datasources:
+          - name: Prometheus
+            type: prometheus
+            url: http://monitoring-prometheus-server.monitoring.svc.cluster.local:80
+            access: proxy
+            isDefault: true
+    
+    # Security settings
+    securityContext:
+      runAsUser: 472
+      runAsGroup: 472
+      fsGroup: 472

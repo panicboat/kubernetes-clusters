@@ -1,0 +1,139 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus
+  namespace: flux-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: prometheus
+      version: "25.27.0"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  install:
+    createNamespace: true
+  targetNamespace: monitoring
+  values:
+    # Server configuration
+    server:
+      # Service configuration
+      service:
+        type: ClusterIP
+        servicePort: 80
+
+      # Ingress configuration for accessing Prometheus
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        hosts:
+          - prometheus.local
+        paths:
+          - path: /
+            pathType: Prefix
+
+      # Resource limits optimized for local development
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+
+      # Persistence for metrics data
+      persistentVolume:
+        enabled: true
+        storageClass: standard
+        size: 2Gi
+
+      # Retention policy
+      retention: "7d"
+
+    # Alert Manager configuration
+    alertmanager:
+      enabled: true
+      service:
+        type: ClusterIP
+        servicePort: 80
+
+      # Resource limits for AlertManager
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # Persistence for AlertManager
+      persistentVolume:
+        enabled: true
+        storageClass: standard
+        size: 1Gi
+
+    # Node Exporter for node metrics
+    nodeExporter:
+      enabled: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+    # Pushgateway for batch job metrics
+    pushgateway:
+      enabled: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+    # Kube State Metrics for Kubernetes object metrics
+    kube-state-metrics:
+      enabled: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+
+    # Disable some components to reduce resource usage for local environment
+    configmapReload:
+      prometheus:
+        enabled: true
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+    
+    # All namespaces pod metrics collection
+    extraScrapeConfigs: |
+      - job_name: 'kubernetes-pods-all'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
