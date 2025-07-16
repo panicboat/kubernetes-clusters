@@ -1,0 +1,5 @@
+# このファイルはflux bootstrapプロセスで自動生成・管理されます
+# 手動での編集は推奨されません
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []

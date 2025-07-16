@@ -41,6 +41,5 @@ pids
 *.temp
 
 # Kubernetes and Helm files
-kind-config.yaml
 Chart.lock
 charts/

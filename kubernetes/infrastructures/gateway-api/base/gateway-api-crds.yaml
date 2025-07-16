@@ -1,0 +1,12 @@
+# Gateway API CRDs
+# This file contains references to install Gateway API CRDs
+# In practice, this would be applied manually or via FluxCD
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-api-installation
+  namespace: kube-system
+data:
+  install.yaml: |
+    # Gateway API CRDs will be installed via:
+    # kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml

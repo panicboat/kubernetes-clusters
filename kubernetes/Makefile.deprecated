@@ -1,0 +1,367 @@
+# FluxCD-managed Multi-Component Makefile for Kubernetes clusters
+# Supports Kustomize (base/overlays) and Helm (environments) directory structures
+# Usage: make help
+
+# Variables
+CLUSTER_NAME ?= k8s-local
+K3D_CONFIG ?= k3d-config.yaml
+FLUXCD_NAMESPACE ?= flux-system
+ENVIRONMENT ?= k3d
+
+# Auto-discover components with standard directory structures
+# Supports: overlays/{environment} (Kustomize) and {environment} (Helm)
+COMPONENTS := $(shell \
+	for dir in */; do \
+		component=$$(basename "$$dir"); \
+		if [ -d "$$component/overlays/$(ENVIRONMENT)" ] || [ -d "$$component/$(ENVIRONMENT)" ]; then \
+			echo "$$component"; \
+		fi; \
+	done | sort)
+
+# Auto-discover flux manifests from all components
+# Search in overlays/{environment} (Kustomize) or {environment} (Helm)
+FLUX_MANIFESTS := $(shell \
+	for component in $(COMPONENTS); do \
+		if [ -d "$$component/overlays/$(ENVIRONMENT)" ]; then \
+			find "$$component/overlays/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null; \
+		elif [ -d "$$component/$(ENVIRONMENT)" ]; then \
+			find "$$component/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null; \
+		fi; \
+	done | sort)
+
+# Colors
+RED = \033[0;31m
+GREEN = \033[0;32m
+YELLOW = \033[0;33m
+BLUE = \033[0;34m
+PURPLE = \033[0;35m
+CYAN = \033[0;36m
+NC = \033[0m
+
+.PHONY: help
+help: ## Show this help message
+	@echo "$(PURPLE)🚀 FluxCD-managed Multi-Component Kubernetes Cluster$(NC)"
+	@echo ""
+	@echo "$(BLUE)🔧 Environment: $(ENVIRONMENT)$(NC)"
+	@if [ -n "$(COMPONENTS)" ]; then \
+		echo "$(BLUE)📦 Components: $(COMPONENTS)$(NC)"; \
+	else \
+		echo "$(YELLOW)⚠️  No components found for environment '$(ENVIRONMENT)'$(NC)"; \
+	fi
+	@echo ""
+	@$(MAKE) list-manifests
+	@echo ""
+	@echo "$(BLUE)🚀 Quick Commands:$(NC)"
+	@echo "  $(GREEN)make up$(NC)                    - Complete GitOps setup with Gateway API"
+	@echo "  $(GREEN)make down$(NC)                  - Destroy everything"
+	@echo "  $(GREEN)make restart$(NC)               - Down + Up"
+	@echo ""
+	@echo "$(BLUE)🔧 FluxCD Management:$(NC)"
+	@echo "  $(GREEN)make deploy-manifests$(NC)      - Deploy all Flux manifests for current environment"
+	@echo "  $(GREEN)make reconcile$(NC)             - Force reconcile all Flux resources"
+	@echo "  $(GREEN)make reconcile-component COMPONENT=<name>$(NC) - Reconcile specific component"
+	@echo "  $(GREEN)make apply-coredns-patch$(NC)   - Apply CoreDNS patch for DNS resolution"
+	@echo "  $(GREEN)make setup-gateway-api$(NC)     - Setup Gateway API with proper timing"
+	@echo ""
+	@echo "$(BLUE)🔍 Monitoring:$(NC)"
+	@echo "  $(GREEN)make status$(NC)                - Show cluster and FluxCD status"
+	@echo "  $(GREEN)make resources$(NC)             - Show Flux resources status"
+	@echo ""
+	@echo "$(BLUE)📋 Information:$(NC)"
+	@echo "  $(GREEN)make list-manifests$(NC)        - List discovered Flux manifests"
+	@echo ""
+	@echo "$(BLUE)🔧 Environment Override:$(NC)"
+	@echo "  $(GREEN)make <command> ENVIRONMENT=staging$(NC)  - Run command for staging environment"
+	@echo "  $(GREEN)make <command> ENVIRONMENT=production$(NC) - Run command for production environment"
+
+.PHONY: check-tools
+check-tools: ## Check if required tools are installed
+	@command -v docker >/dev/null 2>&1 || { echo "$(RED)❌ docker required$(NC)"; exit 1; }
+	@command -v k3d >/dev/null 2>&1 || { echo "$(RED)❌ k3d required$(NC)"; exit 1; }
+	@command -v kubectl >/dev/null 2>&1 || { echo "$(RED)❌ kubectl required$(NC)"; exit 1; }
+	@command -v flux >/dev/null 2>&1 || { echo "$(RED)❌ flux CLI required$(NC)"; exit 1; }
+	@echo "$(GREEN)✅ All tools available$(NC)"
+
+.PHONY: list-manifests
+list-manifests: ## List discovered Flux manifests
+	@echo "$(CYAN)📋 Discovered Manifests (Environment: $(ENVIRONMENT)):$(NC)"
+	@found_any=false; \
+	for component in $(COMPONENTS); do \
+		if [ -d "$$component/overlays/$(ENVIRONMENT)" ]; then \
+			manifests=$$(find "$$component/overlays/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			env_path="overlays/$(ENVIRONMENT)"; \
+		elif [ -d "$$component/$(ENVIRONMENT)" ]; then \
+			manifests=$$(find "$$component/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			env_path="$(ENVIRONMENT)"; \
+		fi; \
+		if [ -n "$$manifests" ]; then \
+			echo "  $(PURPLE)$$component/$$env_path:$(NC)"; \
+			found_any=true; \
+			for manifest in $$manifests; do \
+				kind=$$(grep '^kind:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+				name=$$(grep '^  name:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+				namespace=$$(grep '^  namespace:' $$manifest 2>/dev/null | awk '{print $$2}'); \
+				printf "    $(CYAN)%-20s$(NC) -> %-15s/%-20s (ns: %-15s)\n" "$$(basename $$manifest)" "$$kind" "$$name" "$$namespace"; \
+			done; \
+			echo ""; \
+		fi; \
+	done; \
+	if [ "$$found_any" = "false" ]; then \
+		echo "  $(YELLOW)No manifests found for environment '$(ENVIRONMENT)'$(NC)"; \
+		echo "  $(YELLOW)Expected structures:$(NC)"; \
+		echo "  $(YELLOW)  - Kustomize: {component}/overlays/$(ENVIRONMENT)/*.yaml$(NC)"; \
+		echo "  $(YELLOW)  - Helm: {component}/$(ENVIRONMENT)/*.yaml$(NC)"; \
+		echo "  $(YELLOW)Available components: $(COMPONENTS)$(NC)"; \
+	fi
+
+.PHONY: create-cluster
+create-cluster: check-tools ## Create k3d cluster with disabled default CNI
+	@if k3d cluster list 2>/dev/null | grep -q "^$(CLUSTER_NAME)"; then \
+		echo "$(YELLOW)⚠️  Cluster $(CLUSTER_NAME) exists$(NC)"; \
+	else \
+		echo "$(BLUE)🚀 Creating Cilium-ready cluster $(CLUSTER_NAME)...$(NC)"; \
+		k3d cluster create $(CLUSTER_NAME) \
+			--port "80:80@loadbalancer" \
+			--port "443:443@loadbalancer" \
+			--k3s-arg "--disable=traefik,metrics-server@server:*" \
+			--k3s-arg "--disable-network-policy@server:*" \
+			--k3s-arg "--flannel-backend=none@server:*" \
+			--k3s-arg "--disable-kube-proxy@server:*"; \
+		echo "$(GREEN)✅ Cilium-ready cluster created$(NC)"; \
+	fi
+
+.PHONY: delete-cluster
+delete-cluster: ## Delete k3d cluster
+	@if k3d cluster list 2>/dev/null | grep -q "^$(CLUSTER_NAME)"; then \
+		echo "$(BLUE)🗑️  Deleting cluster $(CLUSTER_NAME)...$(NC)"; \
+		k3d cluster delete $(CLUSTER_NAME); \
+		echo "$(GREEN)✅ Cluster deleted$(NC)"; \
+	else \
+		echo "$(YELLOW)⚠️  Cluster $(CLUSTER_NAME) not found$(NC)"; \
+	fi
+
+
+.PHONY: install-cilium-bootstrap
+install-cilium-bootstrap: ## Install minimal Cilium for network bootstrap
+	@echo "$(BLUE)📦 Installing minimal Cilium for network bootstrap...$(NC)"
+	@helm repo add cilium https://helm.cilium.io/ || true
+	@helm repo update
+	@API_IP=$$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}'); \
+	helm install cilium cilium/cilium --version 1.17.6 \
+		--namespace kube-system \
+		--set kubeProxyReplacement=true \
+		--set k8sServiceHost=$$API_IP \
+		--set k8sServicePort=6443 \
+		--set ipam.operator.clusterPoolIPv4PodCIDRList="10.42.0.0/16" \
+		--set operator.replicas=1 \
+		--set gatewayAPI.enabled=true \
+		--wait --timeout=300s
+	@echo "$(GREEN)✅ Cilium bootstrap complete$(NC)"
+
+.PHONY: install-flux
+install-flux: ## Install FluxCD
+	@echo "$(BLUE)📦 Installing FluxCD...$(NC)"
+	@flux check --pre >/dev/null 2>&1 || { echo "$(RED)❌ FluxCD pre-check failed$(NC)"; exit 1; }
+	@flux install --namespace=$(FLUXCD_NAMESPACE) --network-policy=false --components-extra=image-reflector-controller,image-automation-controller
+	@echo "$(GREEN)✅ FluxCD installed$(NC)"
+
+
+.PHONY: setup-gateway-api
+setup-gateway-api: ## Setup Gateway API with proper timing
+	@echo "$(BLUE)🚀 Setting up Gateway API...$(NC)"
+	@echo "$(BLUE)📍 Waiting for Cilium to be ready...$(NC)"
+	@kubectl wait --for=condition=Ready pod -l k8s-app=cilium -n kube-system --timeout=300s
+	@echo "$(BLUE)📦 Installing Gateway API CRDs...$(NC)"
+	@kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+	@echo "$(BLUE)🔄 Restarting Cilium operator to recognize Gateway API CRDs...$(NC)"
+	@kubectl delete pod -l name=cilium-operator -n kube-system
+	@echo "$(BLUE)📍 Waiting for Cilium operator to be ready...$(NC)"
+	@kubectl wait --for=condition=Ready pod -l name=cilium-operator -n kube-system --timeout=300s
+	@echo "$(BLUE)📦 Applying Gateway configurations...$(NC)"
+	@kubectl apply -f cilium/k3d/gatewayclass.yaml
+	@kubectl apply -f cilium/k3d/hubble-httproute.yaml
+	@echo "$(YELLOW)⚠️  ServiceMonitor and ReferenceGrant will be applied after CRDs and namespace creation$(NC)"
+	@echo "$(GREEN)✅ Gateway API setup complete$(NC)"
+
+.PHONY: deploy-manifests
+deploy-manifests: ## Deploy all Flux manifests
+	@if [ -z "$(COMPONENTS)" ]; then \
+		echo "$(YELLOW)⚠️  No components found for environment '$(ENVIRONMENT)'$(NC)"; \
+		echo "$(YELLOW)💡 Create component directories with standard structures:$(NC)"; \
+		echo "$(YELLOW)💡 Kustomize: component/overlays/$(ENVIRONMENT)/$(NC)"; \
+		echo "$(YELLOW)💡 Helm: component/$(ENVIRONMENT)/$(NC)"; \
+	elif [ -z "$(FLUX_MANIFESTS)" ]; then \
+		echo "$(YELLOW)⚠️  No manifests found in any component for environment '$(ENVIRONMENT)'$(NC)"; \
+		echo "$(YELLOW)💡 Available components: $(COMPONENTS)$(NC)"; \
+	else \
+		echo "$(BLUE)📦 Deploying Flux manifests for environment '$(ENVIRONMENT)'...$(NC)"; \
+		for component in $(COMPONENTS); do \
+			if [ -d "$$component/overlays/$(ENVIRONMENT)" ]; then \
+				component_manifests=$$(find "$$component/overlays/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			elif [ -d "$$component/$(ENVIRONMENT)" ]; then \
+				component_manifests=$$(find "$$component/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			fi; \
+			if [ -n "$$component_manifests" ]; then \
+				echo "$(PURPLE)📦 Component: $$component$(NC)"; \
+				for manifest in $$component_manifests; do \
+					kind=$$(grep '^kind:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+					name=$$(grep '^  name:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+					echo "$(BLUE)  📦 Applying $$kind/$$name from $$(basename $$manifest)...$(NC)"; \
+					kubectl apply -f $$manifest; \
+				done; \
+			fi; \
+		done; \
+		echo "$(GREEN)✅ All manifests deployed$(NC)"; \
+		echo "$(BLUE)🔄 FluxCD will reconcile resources automatically$(NC)"; \
+		echo "$(BLUE)📦 Applying ServiceMonitor and ReferenceGrant after CRDs and namespace creation...$(NC)"; \
+		kubectl apply -f cilium/k3d/servicemonitor.yaml 2>/dev/null || \
+		{ echo "$(YELLOW)⚠️  Will retry ServiceMonitor in 30 seconds...$(NC)"; sleep 30; kubectl apply -f cilium/k3d/servicemonitor.yaml; }; \
+		kubectl apply -f cilium/k3d/referencegrant.yaml 2>/dev/null || \
+		{ echo "$(YELLOW)⚠️  Will retry ReferenceGrant in 30 seconds...$(NC)"; sleep 30; kubectl apply -f cilium/k3d/referencegrant.yaml; }; \
+	fi
+
+.PHONY: remove-manifests
+remove-manifests: ## Remove all Flux manifests
+	@if [ -z "$(COMPONENTS)" ]; then \
+		echo "$(YELLOW)⚠️  No components found for environment '$(ENVIRONMENT)'$(NC)"; \
+	elif [ -z "$(FLUX_MANIFESTS)" ]; then \
+		echo "$(YELLOW)⚠️  No manifests found in any component for environment '$(ENVIRONMENT)'$(NC)"; \
+		echo "$(YELLOW)💡 Available components: $(COMPONENTS)$(NC)"; \
+	else \
+		echo "$(BLUE)🗑️  Removing Flux manifests for environment '$(ENVIRONMENT)'...$(NC)"; \
+		for component in $(COMPONENTS); do \
+			if [ -d "$$component/overlays/$(ENVIRONMENT)" ]; then \
+				component_manifests=$$(find "$$component/overlays/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			elif [ -d "$$component/$(ENVIRONMENT)" ]; then \
+				component_manifests=$$(find "$$component/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+			fi; \
+			if [ -n "$$component_manifests" ]; then \
+				echo "$(PURPLE)🗑️  Component: $$component$(NC)"; \
+				for manifest in $$component_manifests; do \
+					kind=$$(grep '^kind:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+					name=$$(grep '^  name:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+					echo "$(BLUE)  🗑️  Removing $$kind/$$name from $$(basename $$manifest)...$(NC)"; \
+					kubectl delete -f $$manifest --ignore-not-found=true; \
+				done; \
+			fi; \
+		done; \
+		echo "$(GREEN)✅ All manifests removed$(NC)"; \
+	fi
+
+.PHONY: reconcile
+reconcile: ## Force reconcile all Flux resources for current environment
+	@echo "$(BLUE)🔄 Reconciling all Flux resources for environment '$(ENVIRONMENT)'...$(NC)"
+	@if [ -z "$(COMPONENTS)" ]; then \
+		echo "$(YELLOW)⚠️  No components found for environment '$(ENVIRONMENT)'$(NC)"; \
+	else \
+		echo "$(BLUE)🔄 Available components: $(COMPONENTS)$(NC)"; \
+		echo "$(BLUE)🔄 Reconciling GitRepositories...$(NC)"; \
+		flux reconcile source git --all-namespaces 2>/dev/null || echo "$(YELLOW)⚠️  No GitRepositories found$(NC)"; \
+		echo "$(BLUE)🔄 Reconciling HelmRepositories...$(NC)"; \
+		flux reconcile source helm --all-namespaces 2>/dev/null || echo "$(YELLOW)⚠️  No HelmRepositories found$(NC)"; \
+		echo "$(BLUE)🔄 Reconciling Kustomizations...$(NC)"; \
+		flux reconcile kustomization --all-namespaces 2>/dev/null || echo "$(YELLOW)⚠️  No Kustomizations found$(NC)"; \
+		echo "$(BLUE)🔄 Reconciling HelmReleases...$(NC)"; \
+		flux reconcile helmrelease --all-namespaces 2>/dev/null || echo "$(YELLOW)⚠️  No HelmReleases found$(NC)"; \
+		echo "$(GREEN)✅ Reconcile requests sent$(NC)"; \
+	fi
+
+.PHONY: reconcile-component
+reconcile-component: ## Force reconcile specific component (usage: make reconcile-component COMPONENT=fluxcd)
+	@if [ -z "$(COMPONENT)" ]; then \
+		echo "$(RED)❌ COMPONENT parameter required$(NC)"; \
+		echo "$(YELLOW)💡 Usage: make reconcile-component COMPONENT=fluxcd$(NC)"; \
+		echo "$(YELLOW)💡 Available components: $(COMPONENTS)$(NC)"; \
+		exit 1; \
+	elif ! echo "$(COMPONENTS)" | grep -q "$(COMPONENT)"; then \
+		echo "$(RED)❌ Component '$(COMPONENT)' not found$(NC)"; \
+		echo "$(YELLOW)💡 Available components: $(COMPONENTS)$(NC)"; \
+		exit 1; \
+	else \
+		echo "$(BLUE)🔄 Reconciling component '$(COMPONENT)' for environment '$(ENVIRONMENT)'...$(NC)"; \
+		if [ -d "$(COMPONENT)/overlays/$(ENVIRONMENT)" ]; then \
+			component_manifests=$$(find "$(COMPONENT)/overlays/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+		elif [ -d "$(COMPONENT)/$(ENVIRONMENT)" ]; then \
+			component_manifests=$$(find "$(COMPONENT)/$(ENVIRONMENT)" -name "*.yaml" 2>/dev/null | sort); \
+		fi; \
+		if [ -n "$$component_manifests" ]; then \
+			for manifest in $$component_manifests; do \
+				kind=$$(grep '^kind:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+				name=$$(grep '^  name:' $$manifest 2>/dev/null | head -1 | awk '{print $$2}'); \
+				namespace=$$(grep '^  namespace:' $$manifest 2>/dev/null | awk '{print $$2}' || echo "default"); \
+				case "$$kind" in \
+					"GitRepository") flux reconcile source git "$$name" -n "$$namespace" 2>/dev/null || echo "$(YELLOW)⚠️  Failed to reconcile GitRepository $$name$(NC)";; \
+					"HelmRepository") flux reconcile source helm "$$name" -n "$$namespace" 2>/dev/null || echo "$(YELLOW)⚠️  Failed to reconcile HelmRepository $$name$(NC)";; \
+					"Kustomization") flux reconcile kustomization "$$name" -n "$$namespace" 2>/dev/null || echo "$(YELLOW)⚠️  Failed to reconcile Kustomization $$name$(NC)";; \
+					"HelmRelease") flux reconcile helmrelease "$$name" -n "$$namespace" 2>/dev/null || echo "$(YELLOW)⚠️  Failed to reconcile HelmRelease $$name$(NC)";; \
+				esac; \
+			done; \
+			echo "$(GREEN)✅ Component '$(COMPONENT)' reconcile requests sent$(NC)"; \
+		else \
+			echo "$(YELLOW)⚠️  No manifests found for component '$(COMPONENT)'$(NC)"; \
+		fi; \
+	fi
+
+.PHONY: status
+status: ## Show cluster and FluxCD status
+	@echo "$(BLUE)📊 Cluster Status$(NC)"
+	@kubectl cluster-info --context k3d-$(CLUSTER_NAME) 2>/dev/null || echo "$(RED)❌ Cluster not running$(NC)"
+	@echo ""
+	@echo "$(BLUE)📦 FluxCD Status$(NC)"
+	@kubectl get pods -n $(FLUXCD_NAMESPACE) 2>/dev/null || echo "$(YELLOW)FluxCD not installed$(NC)"
+	@echo ""
+	@echo "$(BLUE)🏠 Namespaces$(NC)"
+	@kubectl get namespaces --no-headers 2>/dev/null | awk '{print "  " $$1}' || echo "$(RED)❌ Cannot access cluster$(NC)"
+
+.PHONY: resources
+resources: ## Show Flux resources status
+	@echo "$(BLUE)📋 Flux Resources$(NC)"
+	@echo "$(CYAN)GitRepositories:$(NC)"
+	@kubectl get gitrepositories --all-namespaces 2>/dev/null || echo "  $(YELLOW)No GitRepositories found$(NC)"
+	@echo ""
+	@echo "$(CYAN)HelmRepositories:$(NC)"
+	@kubectl get helmrepositories --all-namespaces 2>/dev/null || echo "  $(YELLOW)No HelmRepositories found$(NC)"
+	@echo ""
+	@echo "$(CYAN)Kustomizations:$(NC)"
+	@kubectl get kustomizations --all-namespaces 2>/dev/null || echo "  $(YELLOW)No Kustomizations found$(NC)"
+	@echo ""
+	@echo "$(CYAN)HelmReleases:$(NC)"
+	@kubectl get helmreleases --all-namespaces 2>/dev/null || echo "  $(YELLOW)No HelmReleases found$(NC)"
+
+
+
+
+.PHONY: apply-coredns-patch
+apply-coredns-patch: ## Apply CoreDNS patch for DNS resolution
+	@echo "$(BLUE)📦 Applying CoreDNS patch for DNS resolution...$(NC)"
+	@kubectl apply -f cilium/k3d/coredns-patch.yaml
+	@kubectl rollout restart deployment/coredns -n kube-system
+	@echo "$(BLUE)📍 Waiting for CoreDNS to be ready...$(NC)"
+	@kubectl wait --for=condition=available deployment/coredns -n kube-system --timeout=120s
+	@echo "$(GREEN)✅ CoreDNS patch applied$(NC)"
+
+.PHONY: up
+up: create-cluster install-cilium-bootstrap install-flux apply-coredns-patch setup-gateway-api deploy-manifests ## Complete GitOps setup with proper dependencies
+	@echo "$(GREEN)🎉 Complete GitOps environment ready!$(NC)"
+	@echo ""
+	@echo "$(BLUE)Cilium Status:$(NC)"
+	@kubectl get pods -n kube-system -l k8s-app=cilium 2>/dev/null || echo "$(YELLOW)Cilium not found$(NC)"
+	@echo ""
+	@echo "$(BLUE)Flux Resources:$(NC)"
+	@flux get all --all-namespaces 2>/dev/null || echo "$(YELLOW)No resources deployed$(NC)"
+	@echo ""
+	@echo "$(BLUE)Gateway Status:$(NC)"
+	@kubectl get gateway -n default 2>/dev/null || echo "$(YELLOW)No gateway found$(NC)"
+	@echo ""
+	@echo "$(BLUE)Quick Access:$(NC)"
+	@echo "  $(GREEN)make resources$(NC)          - Check resources status"
+	@echo "  $(GREEN)make reconcile$(NC)          - Force reconciliation"
+	@echo "  $(GREEN)make status$(NC)             - Overall cluster status"
+
+.PHONY: down
+down: remove-manifests delete-cluster ## Destroy everything
+	@echo "$(GREEN)🧹 Environment cleaned up$(NC)"
+
+.PHONY: restart
+restart: down up ## Restart everything
+	@echo "$(GREEN)🔄 Environment restarted$(NC)"
